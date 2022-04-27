@@ -16,13 +16,14 @@ import (
 
 var Inpfile = flag.String("in", "\\temp\\overnightoffsite.sql", "The input SQL file")
 var Outfile = flag.String("out", "sqlite.sql", "The output SQL file")
-var bk = flag.Int("bk", 3000, "Size of buffer in 1024 byte chunks")
+var bk = flag.Int("bk", 4000, "Size of buffer in 1024 byte chunks")
 var maxInserts = flag.Int("max", -1, "Max number of INSERTs to process")
 var onlyTable = flag.String("table", "", "Only process this table")
 var useTrans = flag.Int("trans", 0, "0=no transactions' 1=single transaction; -1=per table transactions")
 var verbose = flag.Bool("v", false, "Show more messages")
 var imgFolder = flag.String("images", "\\temp\\crap", "Folder to write image files")
 var imgNumber = flag.Int("imgnum", 1, "First number to use for image files")
+var cfgFile = flag.String("cfg", "", "File containing YAML configuration")
 
 var yml = `
 DropTables: [archiveddocs,	# Don't care
@@ -66,15 +67,20 @@ SkipWords: [COMMENT,CHARSET,ENGINE,DEFAULT,AUTO_INCREMENT]
 
 SkipClauses: [PRIMARY,UNIQUE,KEY,ON]
 
-ExtractImageTables: [{ "name":"tcustomerdocs", "ix":4}]
+ExtractImageTables: [{ "name":"tcustomerdocs", "ix":4, "year":2, "plan": 1 }]
 
-ImageFilename: "img%v.jpg"
+# Image names can be anything but can include Year scanned, Plan number, relative serial number
+ImageFilename: "y%v-p%v-i%v.jpg"
+
+FlagOK: true
 
 `
 
 type ImageTable struct {
 	Tablename    string `yaml:"name"`
 	ImageFieldIx int    `yaml:"ix"`
+	YearFieldIx  int    `yaml:"year"`
+	PlanFieldIx  int    `yaml:"plan"`
 }
 
 var cfg struct {
@@ -84,6 +90,7 @@ var cfg struct {
 	SkipClauses   []string     `yaml:"SkipClauses"`
 	ImageTables   []ImageTable `yaml:"ExtractImageTables"`
 	ImageFilename string       `yaml:"ImageFilename"`
+	OK            bool         `yaml:"FlagOK"`
 }
 
 const appversion = "Datasnag v0.1"
@@ -96,16 +103,55 @@ var SkipNextToken = false
 var CommaWaiting = false
 var ImagesStored = 0
 
+func fileExists(x string) bool {
+
+	_, err := os.Stat(x)
+	return err == nil
+
+}
+
+func loadConfig() bool {
+
+	var D *yaml.Decoder
+
+	if *cfgFile != "" && !fileExists(*cfgFile) {
+		fmt.Printf("Can't find config file %v\n", *cfgFile)
+		return false
+	}
+
+	if *cfgFile != "" {
+		file, err := os.Open(*cfgFile)
+		if err != nil {
+			return false
+		}
+		defer file.Close()
+		D = yaml.NewDecoder(file)
+	} else {
+		D = yaml.NewDecoder(strings.NewReader(yml))
+	}
+
+	D.Decode(&cfg)
+	if *verbose || !cfg.OK {
+		fmt.Printf("%v\n", cfg)
+	}
+	if !cfg.OK {
+		fmt.Println("Configuration not good, please fix and try again")
+		return false
+	}
+
+	return true
+
+}
 func main() {
 
 	fmt.Printf("%v Copyright (c) 2022 Bob Stammers\n", appversion)
 	flag.Parse()
 
-	mybuffersize = *bk * 1024
+	if !loadConfig() {
+		return
+	}
 
-	D := yaml.NewDecoder(strings.NewReader(yml))
-	D.Decode(&cfg)
-	fmt.Printf("%v\n", cfg)
+	mybuffersize = *bk * 1024
 
 	processFile(*Inpfile)
 	if ImagesStored > 0 {
@@ -193,10 +239,14 @@ func processFile(f string) {
 		}
 		isImg := false
 		imgCol := 0
+		yearCol := 0
+		planCol := 0
 		for _, i := range cfg.ImageTables {
 			if tname == "`"+i.Tablename+"`" {
 				isImg = true
 				imgCol = i.ImageFieldIx
+				yearCol = i.YearFieldIx
+				planCol = i.PlanFieldIx
 				break
 			}
 		}
@@ -210,7 +260,7 @@ func processFile(f string) {
 		case "DROP":
 			processDropLine(x)
 		case "INSERT":
-			processInsertLine(x, isImg, imgCol)
+			processInsertLine(x, isImg, imgCol, yearCol, planCol)
 			numInserts++
 			if *maxInserts > 0 && numInserts > *maxInserts {
 				return
@@ -303,7 +353,7 @@ func processDropLine(x string) {
 	W.WriteString("\n" + x)
 }
 
-func processInsertLine(x string, img bool, ix int) {
+func processInsertLine(x string, img bool, ix int, yearix int, planix int) {
 
 	y := strings.ReplaceAll(x, `\'`, "''")
 	if !img {
@@ -317,15 +367,23 @@ func processInsertLine(x string, img bool, ix int) {
 	re2 := regexp.MustCompile(`('[^']*'|[^,]*),?`)
 	rey := re2.FindAllStringSubmatch(rex[2], -1)
 	started := false
+	year := "0000"
+	plan := "0"
 	for rx, ry := range rey {
 		if started {
 			W.WriteString(",")
 		}
 		if rx != ix {
+			if rx == yearix {
+				year = ry[1][1:5]
+			}
+			if rx == planix {
+				plan = ry[1]
+			}
 			//fmt.Printf("rey %v: %v\n", rx, ry)
 			W.WriteString(ry[1])
 		} else {
-			imgname := storeImage([]byte(ry[1][2:]))
+			imgname := storeImage([]byte(ry[1][2:]), year, plan)
 			W.WriteString("'" + imgname + "'")
 		}
 		started = true
@@ -351,9 +409,9 @@ func processUnlockLine(x string) {
 
 }
 
-func storeImage(hexbytes []byte) string {
+func storeImage(hexbytes []byte, year string, plan string) string {
 
-	fname := fmt.Sprintf(cfg.ImageFilename, *imgNumber)
+	fname := fmt.Sprintf(cfg.ImageFilename, year, plan, *imgNumber)
 	*imgNumber++
 	fpath := filepath.Join(*imgFolder, fname)
 	f, err := os.Create(fpath)
