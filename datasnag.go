@@ -31,7 +31,7 @@ DropTables: [archiveddocs,	# Don't care
 			"switchboard items",
 			tblletters,		# superseded
 			tletterqq,		# transactional only, bad export
-			tletterq,		# transaction, defunct, bad export
+			tletterq,		# transaction, defunct, bad export. Still referenced but not actually used as such
 			tmessages,		# transactional, formatting
 			callblockers,	# defunct
 			cardchecks,
@@ -355,16 +355,19 @@ func processDropLine(x string) {
 
 func processInsertLine(x string, img bool, ix int, yearix int, planix int) {
 
-	y := strings.ReplaceAll(x, `\'`, "''")
 	if !img {
+		y := strings.ReplaceAll(x, `\'`, "''")
 		W.WriteString(y)
 		return
 	}
+
+	y := strings.ReplaceAll(x, `\'`, "~~") // Let's just cheat
 	re := regexp.MustCompile(`([^\(]+)\(([^\)]+)`)
 	rex := re.FindStringSubmatch(y)
 	W.WriteString(rex[1] + "(")
 
 	re2 := regexp.MustCompile(`('[^']*'|[^,]*),?`)
+
 	rey := re2.FindAllStringSubmatch(rex[2], -1)
 	started := false
 	year := "0000"
@@ -381,7 +384,7 @@ func processInsertLine(x string, img bool, ix int, yearix int, planix int) {
 				plan = ry[1]
 			}
 			//fmt.Printf("rey %v: %v\n", rx, ry)
-			W.WriteString(ry[1])
+			W.WriteString(strings.ReplaceAll(ry[1], `~~`, "''"))
 		} else {
 			imgname := storeImage([]byte(ry[1][2:]), year, plan)
 			W.WriteString("'" + imgname + "'")
